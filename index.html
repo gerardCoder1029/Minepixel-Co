@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Minecraft Clone</title>
+<style>
+  body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
+  #hotbar { position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%); display: flex; }
+  .hotbar-slot { width: 50px; height: 50px; border: 2px solid #000; margin: 0 5px; }
+  .selected { border-color: red !important; }
+  .crosshair { position: absolute; top: 50%; left: 50%; width: 10px; height: 10px; background: rgba(255, 255, 255, 0.7); transform: translate(-50%, -50%); }
+  #title-screen { display: none; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0, 0, 0, 0.8); color: white; padding: 20px; }
+  .hidden { display: none; }
+  .button { margin: 10px; padding: 10px; background: #444; color: white; border: none; cursor: pointer; }
+  #minecraft-version { position: absolute; top: 10px; left: 10px; color: white; }
+</style>
+</head>
+<body>
+<div id="hotbar"></div>
+<div id="crosshair" class="crosshair"></div>
+<div id="minecraft-version">Minecraft 1.0</div>
+<div id="title-screen">
+  <button id="save-world" class="button">Save World</button>
+  <button id="close-world" class="button">Close World</button>
+  <button id="new-world" class="button">New World</button>
+  <button id="back-to-game" class="button">Back to Game</button>
+</div>
+
+<audio id="background-music" loop></audio>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/simplex-noise@2.4.0/simplex-noise.min.js"></script>
+<script>
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer();
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// Lighting
+const ambientLight = new THREE.AmbientLight(0x404040);
+scene.add(ambientLight);
+const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+directionalLight.position.set(1, 1, 0.5).normalize();
+scene.add(directionalLight);
+
+const blockSize = 1;
+const chunkSize = 8; // Reduced chunk size for better performance
+const renderDistance = 1; // Reduced render distance for better performance
+const blocks = new Map();
+let canPlaceBlock = false;
+
+const blockColors = {
+  dirt: 0x6B8E23,
+  stone: 0x808080,
+  grass: 0x00FF00,
+  bedrock: 0x000000,
+  treeTrunk: 0x8B4513,
+  leaves: 0x00FF00,
+};
+
+const controls = {
+  forward: false,
+  backward: false,
+  left: false,
+  right: false,
+  up: false,
+  down: false,
+};
+
+let currentChunk = { x: 0, y: 0 };
+const chunkCache = new Map();
+const chunkLoadDistance = 1;
+
+// Create hotbar slots
+const hotbarSlots = [];
+const inventory = ['dirt', 'stone', 'obsidian', 'treeTrunk', 'leaves', 'glass', 'torch', null, null, null];
+const hotbar = document.getElementById('hotbar');
+
+for (let i = 0; i < 10; i++) {
+  const slot = document.createElement('div');
+  slot.classList.add('hotbar-slot');
+  if (i === 0) slot.classList.add('selected');
+  hotbarSlots.push(slot);
+  hotbar.appendChild(slot);
+}
+
+// Handle hotbar selection
+document.addEventListener('keydown', (event) => {
+  const key = parseInt(event.key);
+  if (key >= 1 && key <= 9) {
+    hotbarSlots.forEach(slot => slot.classList.remove('selected'));
+    hotbarSlots[key - 1].classList.add('selected');
+  }
+});
+
+// Add block function
+function addBlock(position, type) {
+  const geometry = new THREE.BoxGeometry(blockSize, blockSize, blockSize);
+  const material = new THREE.MeshLambertMaterial({ color: blockColors[type] });
+  const block = new THREE.Mesh(geometry, material);
+  block.position.set(position.x, position.y, position.z);
+  block.type = type;
+  block.isBlock = true;
+  scene.add(block);
+  const chunkKey = getChunkKey(position);
+  if (!blocks.has(chunkKey)) {
+    blocks.set(chunkKey, []);
+  }
+  blocks.get(chunkKey).push(block);
+}
+
+// Remove block function
+function removeBlock(block) {
+  scene.remove(block);
+  const chunkKey = getChunkKey(block.position);
+  if (blocks.has(chunkKey)) {
+    const chunkBlocks = blocks.get(chunkKey);
+    const blockIndex = chunkBlocks.indexOf(block);
+    if (blockIndex !== -1) {
+      chunkBlocks.splice(blockIndex, 1);
+    }
+  }
+}
+
+// Generate world function using Perlin noise
+function generateWorld() {
+  blocks.forEach((chunkBlocks, chunkKey) => {
+    chunkBlocks.forEach(block => scene.remove(block));
+  });
+  blocks.clear();
+
+  const noise = new SimplexNoise();
+  const amplitude = 20;
+  const frequency = 0.05;
+
+  for (let cx = -chunkLoadDistance; cx <= chunkLoadDistance; cx++) {
+    for (let cz = -chunkLoadDistance; cz <= chunkLoadDistance; cz++) {
+      generateChunk(cx, cz, noise, amplitude, frequency);
+    }
+  }
+}
+
+function generateChunk(cx, cz, noise, amplitude, frequency) {
+  const chunkBlocks = [];
+
+  for (let x = cx * chunkSize; x < (cx + 1) * chunkSize; x++) {
+    for (let z = cz * chunkSize; z < (cz + 1) * chunkSize; z++) {
+      const height = Math.floor(noise.noise2D(x * frequency, z * frequency) * amplitude) + 20;
+
+      for (let y = 0; y <= height; y++) {
+        let type = 'stone';
+        if (y === height) type = 'grass';
+        else if (y > height - 5) type = 'dirt';
+        else if (y === 0) type = 'bedrock';
+        const position = { x, y, z };
+        addBlock(position, type);
+        chunkBlocks.push({ position, type });
+      }
+
+      // Add trees with a 1% chance per block
+      if (Math.random() < 0.01 && height > 1) {
+        const treeBlocks = addTree(x, height, z);
+        chunkBlocks.push(...treeBlocks);
+      }
+    }
+  }
+
+  const chunkKey = `${cx},${cz}`;
+  chunkCache.set(chunkKey, chunkBlocks);
+}
+
+function addTree(x, y, z) {
+  const trunkHeight = Math.floor(Math.random() * 4) + 3;
+  const leavesHeight = Math.floor(Math.random() * 3) + 2;
+  const treeBlocks = [];
+
+  for (let i = 0; i < trunkHeight; i++) {
+    const position = { x, y: y + i, z };
+    addBlock(position, 'treeTrunk');
+    treeBlocks.push({ position, type: 'treeTrunk' });
+  }
+
+  for (let dy = 1; dy <= leavesHeight; dy++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dz = -2; dz <= 2; dz++) {
+        if (Math.abs(dx) + Math.abs(dz) < 4 - dy) {
+          const position = { x: x + dx, y: y + trunkHeight + dy - 1, z: z + dz };
+          addBlock(position, 'leaves');
+          treeBlocks.push({ position, type: 'leaves' });
+        }
+      }
+    }
+  }
+
+  return treeBlocks;
+}
+
+function getChunkKey(position) {
+  const cx = Math.floor(position.x / chunkSize);
+  const cz = Math.floor(position.z / chunkSize);
+  return `${cx},${cz}`;
+}
+
+function findSpawnHeight(x, z, noise, amplitude, frequency) {
+  return Math.floor(noise.noise2D(x * frequency, z * frequency) * amplitude) + 21; // 1 block above the highest block
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const speed = 0.1;
+  const move = (dx, dy, dz) => {
+    const direction = new THREE.Vector3(dx, dy, dz);
+    direction.applyQuaternion(camera.quaternion);
+    const newPosition = camera.position.clone().add(direction);
+
+    // Block collision detection
+    const chunkKey = getChunkKey(newPosition);
+    const chunkBlocks = blocks.get(chunkKey);
+    if (chunkBlocks) {
+      for (const block of chunkBlocks) {
+        const distance = newPosition.distanceTo(block.position);
+        if (distance < blockSize) {
+          return; // Stop movement if colliding with a block
+        }
+      }
+    }
+
+    camera.position.copy(newPosition);
+  };
+
+  if (controls.forward) move(0, 0, -speed);
+  if (controls.backward) move(0, 0, speed);
+  if (controls.left) move(-speed, 0, 0);
+  if (controls.right) move(speed, 0, 0);
+  if (controls.up) move(0, speed, 0);
+  if (controls.down) move(0, -speed, 0);
+
+  // Prevent falling into the void
+  if (camera.position.y < -10) {
+    const spawnHeight = findSpawnHeight(camera.position.x, camera.position.z, noise, amplitude, frequency);
+    camera.position.y = spawnHeight;
+  }
+
+  // Chunk loading and unloading
+  const newChunk = {
+    x: Math.floor(camera.position.x / chunkSize),
+    y: Math.floor(camera.position.z / chunkSize),
+  };
+
+  if (newChunk.x !== currentChunk.x || newChunk.y !== currentChunk.y) {
+    currentChunk = newChunk;
+    updateChunks();
+  }
+
+  renderer.render(scene, camera);
+}
+
+function updateChunks() {
+  const newChunks = new Set();
+
+  for (let cx = currentChunk.x - chunkLoadDistance; cx <= currentChunk.x + chunkLoadDistance; cx++) {
+    for (let cz = currentChunk.y - chunkLoadDistance; cz <= currentChunk.y + chunkLoadDistance; cz++) {
+      const chunkKey = `${cx},${cz}`;
+      newChunks.add(chunkKey);
+
+      if (!chunkCache.has(chunkKey)) {
+        const noise = new SimplexNoise();
+        const amplitude = 20;
+        const frequency = 0.05;
+        generateChunk(cx, cz, noise, amplitude, frequency);
+        chunkCache.set(chunkKey, []);
+      }
+    }
+  }
+
+  // Unload old chunks
+  chunkCache.forEach((chunkBlocks, chunkKey) => {
+    if (!newChunks.has(chunkKey)) {
+      chunkBlocks.forEach(block => scene.remove(block));
+      chunkCache.delete(chunkKey);
+    }
+  });
+}
+
+// Event listeners for controls
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'w') controls.forward = true;
+  if (event.key === 's') controls.backward = true;
+  if (event.key === 'a') controls.left = true;
+  if (event.key === 'd') controls.right = true;
+  if (event.key === ' ') controls.up = true;
+  if (event.key === 'Shift') controls.down = true;
+});
+
+document.addEventListener('keyup', (event) => {
+  if (event.key === 'w') controls.forward = false;
+  if (event.key === 's') controls.backward = false;
+  if (event.key === 'a') controls.left = false;
+  if (event.key === 'd') controls.right = false;
+  if (event.key === ' ') controls.up = false;
+  if (event.key === 'Shift') controls.down = false;
+});
+
+// Mouse controls for block placing and breaking
+document.addEventListener('mousedown', (event) => {
+  const raycaster = new THREE.Raycaster();
+  const mouse = new THREE.Vector2(0, 0);
+  raycaster.setFromCamera(mouse, camera);
+
+  const intersects = raycaster.intersectObjects([...blocks.values()].flat());
+
+  if (intersects.length > 0) {
+    const intersect = intersects[0];
+
+    if (event.button === 0) {
+      removeBlock(intersect.object);
+    } else if (event.button === 2) {
+      const selectedSlot = hotbarSlots.findIndex(slot => slot.classList.contains('selected'));
+      const blockType = inventory[selectedSlot];
+
+      if (blockType) {
+        const pos = intersect.object.position.clone().add(intersect.face.normal);
+        addBlock(pos, blockType);
+      }
+    }
+  }
+});
+
+// Pointer lock controls
+document.addEventListener('click', () => {
+  document.body.requestPointerLock();
+});
+
+// Pointer lock change event
+document.addEventListener('pointerlockchange', () => {
+  if (document.pointerLockElement) {
+    document.addEventListener('mousemove', onPointerMove);
+  } else {
+    document.removeEventListener('mousemove', onPointerMove);
+  }
+});
+
+// Mouse movement handler
+function onPointerMove(event) {
+  const sensitivity = 0.002;
+  camera.rotation.y -= event.movementX * sensitivity;
+  camera.rotation.x -= event.movementY * sensitivity;
+  camera.rotation.x = Math.max(-Math.PI / 2, Math.min(Math.PI / 2, camera.rotation.x));
+}
+
+// Handle title screen buttons
+document.getElementById('save-world').addEventListener('click', () => {
+  const worldData = [];
+  chunkCache.forEach((chunkBlocks, chunkKey) => {
+    chunkBlocks.forEach(block => {
+      worldData.push({
+        position: block.position,
+        type: block.type,
+      });
+    });
+  });
+  localStorage.setItem('world', JSON.stringify(worldData));
+});
+
+document.getElementById('close-world').addEventListener('click', () => {
+  window.location.reload();
+});
+
+document.getElementById('new-world').addEventListener('click', () => {
+  localStorage.removeItem('world');
+  generateWorld();
+  document.exitPointerLock();
+  document.getElementById('title-screen').classList.remove('hidden');
+});
+
+document.getElementById('back-to-game').addEventListener('click', () => {
+  document.getElementById('title-screen').classList.add('hidden');
+  document.body.requestPointerLock();
+});
+
+// Load saved world or generate new one
+const noise = new SimplexNoise();
+const amplitude = 20;
+const frequency = 0.05;
+
+if (localStorage.getItem('world')) {
+  const savedBlocks = JSON.parse(localStorage.getItem('world'));
+  savedBlocks.forEach(({ position, type }) => addBlock(position, type));
+} else {
+  generateWorld();
+  // Find a spawn position above ground level
+  const spawnHeight = findSpawnHeight(0, 0, noise, amplitude, frequency);
+  camera.position.set(0, spawnHeight, 0);
+}
+
+// Background music
+const musicFiles = [];
+for (let i = 1; i <= 31; i++) {
+  musicFiles.push(`music${i}.mp3`);
+}
+const music = document.getElementById('background-music');
+
+function playRandomMusic() {
+  const randomIndex = Math.floor(Math.random() * musicFiles.length);
+  music.src = musicFiles[randomIndex];
+  music.play().catch(() => {
+    document.addEventListener('click', () => {
+      music.play();
+    }, { once: true });
+  });
+}
+
+music.addEventListener('ended', playRandomMusic);
+playRandomMusic();
+
+animate();
+</script>
+</body>
+</html>
